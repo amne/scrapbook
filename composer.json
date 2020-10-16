@@ -1,5 +1,5 @@
 {
-  "name": "matthiasmullie/scrapbook",
+  "name": "amne/scrapbook",
   "type": "library",
   "description": "Scrapbook is a PHP cache library, with adapters for e.g. Memcached, Redis, Couchbase, APC(u), SQL and additional capabilities (e.g. transactions, stampede protection) built on top.",
   "keywords": [

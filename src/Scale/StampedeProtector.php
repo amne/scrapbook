@@ -51,11 +51,11 @@ class StampedeProtector implements KeyValueStore
     protected $cache = array();
 
     /**
-     * Amount of time, in milliseconds, this class guarantees protection.
+     * Amount of time, in seconds, this class guarantees protection.
      *
      * @var int
      */
-    protected $sla = 1000;
+    protected $sla = 1;
 
     /**
      * Amount of times every process will poll within $sla time.
@@ -68,7 +68,7 @@ class StampedeProtector implements KeyValueStore
      * @param KeyValueStore $cache The real cache we'll buffer for
      * @param int           $sla   Stampede protection time, in milliseconds
      */
-    public function __construct(KeyValueStore $cache, $sla = 1000)
+    public function __construct(KeyValueStore $cache, $sla = 1)
     {
         $this->cache = $cache;
         $this->sla = $sla;
@@ -269,7 +269,7 @@ class StampedeProtector implements KeyValueStore
      */
     protected function sleep()
     {
-        $break = $this->sla / $this->attempts;
+        $break = $this->sla * 1000 / $this->attempts;
         usleep(1000 * $break);
 
         return true;

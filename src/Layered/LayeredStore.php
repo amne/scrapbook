@@ -115,25 +115,36 @@ class LayeredStore implements KeyValueStore
         // stop when we've found all the values or we're out of adapters
         while (!empty($missing) && $adapterIndex < count($this->adapters)) {
             $adapterValues[$adapterIndex] = $this->adapters[$adapterIndex]->getMulti($missing);
+            $values = array_merge($values, $adapterValues[$adapterIndex]);
             // keep track of missing values in each adapter
-            $missing = $adapterMissing[$adapterIndex] = array_diff($missing, $adapterValues[$adapterIndex]);
-            $adapterIndex++;
+            $missing = $adapterMissing[$adapterIndex] = array_diff($missing, array_keys($adapterValues[$adapterIndex]));
+            if (!empty($missing)) {
+                $adapterIndex++;
+            }
         }
 
         // walk back and update missing values
-        if (count($missing) != count($keys)) {
+        if (count($missing) > 0 && count($values) > 0) {
+            $missingValues = [];
             while ($adapterIndex > 0) {
                 $adapterIndex--;
-                $values = array_merge($values, $adapterValues[$adapterIndex+1]);
+                foreach ($adapterMissing[$adapterIndex] as $missingKey) {
+                    $missingValues = $adapterValues[$adapterIndex+1][$missingKey];
+                }
+                if (empty($missingValues)) {
+                    continue;
+                }
+                // $missingValues = array_merge($missingValues, $adapterValues[$adapterIndex+1]);
                 // write the values found in the next adapter
                 // because those were the ones we didn't find in this one
                 // RC: between reads values could have expired in the next adapter
                 // which means we might not have all the missing values
-                $this->adapters[$adapterIndex]->setMulti($values);
+                $this->adapters[$adapterIndex]->setMulti($missingValues);
             }
         }
 
-        $tokens = array_walk($values, 'serialize');
+        $tokens = $values;
+        $tokens = array_walk($tokens, fn($e) =>  serialize($e));
 
         return $values;
     }

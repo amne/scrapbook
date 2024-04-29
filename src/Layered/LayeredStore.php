@@ -73,19 +73,21 @@ class LayeredStore implements KeyValueStore
     {
         // Start with the first adapter
         $adapterIndex = 0;
-        $token = uniqid('', false);
-        $this->adapterTokens[$token] = [];
         $value = false;
-        while (false === $value && $adapterIndex < count($this->adapters)) {
+        $adapterTokens = [];
+        $token = null;
+        while (null === $token && false === $value && $adapterIndex < count($this->adapters)) {
             $value = $this->adapters[$adapterIndex]->get($key, $adapterToken);
+            $token = $adapterTokens[$adapterIndex] = $adapterToken;
             // if this adapter doesn't have the key go to the next adapter
             $adapterIndex++;
         }
 
-        if (false === $value) {
+        if (null === $token && false === $value) {
             return false;
         }
 
+        $token = uniqid('', false);
         $this->adapterTokens[$adapterIndex][$token] = $adapterToken;
         // write the missing value in the previous adapters
         while ($adapterIndex) {
@@ -112,39 +114,30 @@ class LayeredStore implements KeyValueStore
         $adapterValues = [];
         $values = [];
         $missing = $keys;
+        $syncback = [];
         // stop when we've found all the values or we're out of adapters
         while (!empty($missing) && $adapterIndex < count($this->adapters)) {
-            $adapterValues[$adapterIndex] = $this->adapters[$adapterIndex]->getMulti($missing);
+            $adapterValues[$adapterIndex] = $this->adapters[$adapterIndex]->getMulti($missing) ?? [];
             $values = array_merge($values, $adapterValues[$adapterIndex]);
             // keep track of missing values in each adapter
+            $syncback[$adapterIndex] = array_intersect($missing, array_keys($adapterValues[$adapterIndex]));
             $missing = $adapterMissing[$adapterIndex] = array_diff($missing, array_keys($adapterValues[$adapterIndex]));
             if (!empty($missing)) {
                 $adapterIndex++;
             }
         }
 
-        // walk back and update missing values
-        if (count($missing) > 0 && count($values) > 0) {
-            $missingValues = [];
-            while ($adapterIndex > 0) {
-                $adapterIndex--;
-                foreach ($adapterMissing[$adapterIndex] as $missingKey) {
-                    $missingValues = $adapterValues[$adapterIndex+1][$missingKey];
-                }
-                if (empty($missingValues)) {
-                    continue;
-                }
-                // $missingValues = array_merge($missingValues, $adapterValues[$adapterIndex+1]);
-                // write the values found in the next adapter
-                // because those were the ones we didn't find in this one
-                // RC: between reads values could have expired in the next adapter
-                // which means we might not have all the missing values
-                $this->adapters[$adapterIndex]->setMulti($missingValues);
+        // walk back and sync missing values
+        while ($adapterIndex > 1) {
+            $adapterIndex--;
+            if (!count($syncback[$adapterIndex])) {
+                continue;
             }
+            $this->adapters[$adapterIndex-1]->setMulti($syncback[$adapterIndex]);
         }
 
         $tokens = $values;
-        $tokens = array_walk($tokens, fn($e) =>  serialize($e));
+        array_walk($tokens, fn($e) =>  serialize($e));
 
         return $values;
     }
@@ -166,7 +159,7 @@ class LayeredStore implements KeyValueStore
         if (!$result) {
             // best effort rollback
             while ($adapterIndex < count($this->adapters)) {
-                $this->adapters[$adapterIndex]->delete($key);
+                $this->adapters[$adapterIndex++]->delete($key);
             }
         }
 
@@ -185,7 +178,7 @@ class LayeredStore implements KeyValueStore
         if (!$result) {
             // best effort rollback
             while ($adapterIndex < count($this->adapters)) {
-                $this->adapters[$adapterIndex]->deleteMulti(array_keys($items));
+                $this->adapters[$adapterIndex++]->deleteMulti(array_keys($items));
             }
         }
 

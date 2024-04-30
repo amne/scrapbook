@@ -137,14 +137,20 @@ class LayeredStore implements KeyValueStore
         }
 
         $tokens = $values;
-        array_walk($tokens, fn($e) =>  serialize($e));
+        array_walk($tokens, fn(&$e) => $e = serialize($e));
 
         return $values;
     }
 
+    /**
+     * If expire > 30 days then just leave it alone is its most likely an absolute
+     * unix timestamp.
+     * If expire <= 30 days then it's a relative TTL (lifetime) so we'll clamp it
+     * to max lifetime for the adapter 
+     */
     private function _getAdapterExpire(int $adapterIndex, int $expire = 0)
     {
-        return min($expire, $this->maxLifetimes[$adapterIndex]);
+        return $expire > 2592000 ? $expire : min($expire, $this->maxLifetimes[$adapterIndex]);
     }
 
     public function set(string $key, mixed $value, int $expire = 0): bool
@@ -169,10 +175,14 @@ class LayeredStore implements KeyValueStore
     public function setMulti(array $items, int $expire = 0): array
     {
         $adapterIndex = count($this->adapters);
+        $results = array_fill_keys(array_keys($items), true); 
+        $rollback = [];
         $result = true;
         while ($result && $adapterIndex > 0) {
             $adapterIndex--;
-            $result = $result && $this->adapters[$adapterIndex]->setMulti($items, $this->_getAdapterExpire($adapterIndex, $expire));
+            $adapterResults = $this->adapters[$adapterIndex]->setMulti($items, $this->_getAdapterExpire($adapterIndex, $expire));
+            array_walk($results, fn(&$r, $k) => $r = $r && $adapterResults[$k]);
+            $result = array_reduce($results, fn($reduced, $r) => $reduced && $r, true);
         }
 
         if (!$result) {
@@ -182,7 +192,7 @@ class LayeredStore implements KeyValueStore
             }
         }
 
-        return $result;
+        return $results;
     }
 
     public function delete(string $key): bool
@@ -191,7 +201,7 @@ class LayeredStore implements KeyValueStore
         $result = true;
         while ($adapterIndex > 0) {
             $adapterIndex--;
-            $result = $result && $this->adapters[$adapterIndex]->delete($key, $value, $this->_getAdapterExpire($adapterIndex, $expire));
+            $result = $result && $this->adapters[$adapterIndex]->delete($key);
         }
 
         return $result;
@@ -200,18 +210,34 @@ class LayeredStore implements KeyValueStore
     public function deleteMulti(array $keys): array
     {
         $adapterIndex = count($this->adapters);
-        $result = true;
+        $results = array_fill_keys($keys, true); 
         while ($adapterIndex > 0) {
             $adapterIndex--;
-            $result = $result && $this->adapters[$adapterIndex]->deleteMulti($keys, $this->_getAdapterExpire($adapterIndex, $expire));
+            $adapterResults = $this->adapters[$adapterIndex]->deleteMulti($keys);
+            array_walk($results, fn(&$r, $k) => $r = $r && $adapterResults[$k]);
+            // $result = array_reduce($results, fn($reduced, $r) => $reduced && $r, true);
         }
 
-        return $result;
+        return $results;
     }
 
     public function add(string $key, mixed $value, int $expire = 0): bool
     {
-        throw new \Exception("method not implemented " . __FUNCTION__ , -1);
+        $adapterIndex = count($this->adapters);
+        $result = true;
+        while ($result && $adapterIndex > 0) {
+            $adapterIndex--;
+            $result = $result && $this->adapters[$adapterIndex]->add($key, $value, $this->_getAdapterExpire($adapterIndex, $expire));
+        }
+
+        if (!$result) {
+            // best effort rollback
+            while ($adapterIndex < count($this->adapters)) {
+                $this->adapters[$adapterIndex++]->delete($key);
+            }
+        }
+
+        return $result;
     }
 
     public function replace(string $key, mixed $value, int $expire = 0): bool
@@ -275,8 +301,8 @@ class LayeredStore implements KeyValueStore
         if (!isset($this->collections[$name])) {
             $adapterIndex = 0; 
             while ($adapterIndex < count($this->adapters)) {
-                $adapterIndex--;
                 $adapterCollections[$adapterIndex] = $this->adapters[$adapterIndex]->getCollection($name);
+                $adapterIndex++;
             }
 
             $this->collections[$name] = new static($adapterCollections, $this->maxLifetimes);

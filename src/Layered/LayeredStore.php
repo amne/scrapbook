@@ -77,9 +77,7 @@ class LayeredStore implements KeyValueStore
         $adapterTokens = [];
         $token = null;
         while (null === $token && false === $value && $adapterIndex < count($this->adapters)) {
-            $value = $this->adapters[$adapterIndex]->get($key, $adapterToken);
-            $token = $adapterTokens[$adapterIndex] = $adapterToken;
-            // if this adapter doesn't have the key go to the next adapter
+            $value = $this->adapters[$adapterIndex]->get($key, $token);
             $adapterIndex++;
         }
 
@@ -87,11 +85,9 @@ class LayeredStore implements KeyValueStore
             return false;
         }
 
-        $token = uniqid('', false);
-        $this->adapterTokens[$adapterIndex][$token] = $adapterToken;
+        $token = md5(serialize($value)); 
         // write the missing value in the previous adapters
-        while ($adapterIndex) {
-            $adapterIndex--;
+        while (--$adapterIndex) {
             $this->adapters[$adapterIndex]->set($key, $value);
         }
 
@@ -137,7 +133,7 @@ class LayeredStore implements KeyValueStore
         }
 
         $tokens = $values;
-        array_walk($tokens, fn(&$e) => $e = serialize($e));
+        array_walk($tokens, fn(&$e) => $e = md5(serialize($e)));
 
         return $values;
     }
@@ -254,17 +250,49 @@ class LayeredStore implements KeyValueStore
 
     public function cas(mixed $token, string $key, mixed $value, int $expire = 0): bool
     {
-        throw new \Exception("method not implemented " . __FUNCTION__ , -1);
+        $this->get($key, $currentToken);
+        if ($token !== $currentToken || null === $token) {
+            return false;
+        }
+
+        return $this->set($key, $value, $expire);
     }
 
+    /**
+     * Incrementing a value in a layered cache needs to compromise on two things:
+     * - we'll always do the increment on the last layer and sync the value to
+     *   the higher layers
+     * - we need to reset the expiration
+     */
     public function increment(string $key, int $offset = 1, int $initial = 0, int $expire = 0): int|false
     {
-        throw new \Exception("method not implemented " . __FUNCTION__ , -1);
+        $adapterIndex = count($this->adapters) - 1;
+        $result = $this->adapters[$adapterIndex]->increment($key, $offset, $initial, $expire);
+        if (false !== $result) {
+            while ($adapterIndex) {
+                $adapterIndex--;
+                $this->adapters[$adapterIndex]->set($key, $result, $expire);
+            }
+        }
+
+        return $result;
     }
 
+    /**
+     * See increment() for notes about sync and expire
+     */
     public function decrement(string $key, int $offset = 1, int $initial = 0, int $expire = 0): int|false
     {
-        throw new \Exception("method not implemented " . __FUNCTION__ , -1);
+        $adapterIndex = count($this->adapters) - 1;
+        $result = $this->adapters[$adapterIndex]->decrement($key, $offset, $initial, $expire);
+        if (false !== $result) {
+            while ($adapterIndex) {
+                $adapterIndex--;
+                $this->adapters[$adapterIndex]->set($key, $result, $expire);
+            }
+        }
+
+        return $result;
     }
 
     public function touch(string $key, int $expire): bool
@@ -273,7 +301,7 @@ class LayeredStore implements KeyValueStore
         $result = true;
         while ($adapterIndex > 0) {
             $adapterIndex--;
-            $result = $result && $this->adapters[$adapterIndex]->replace($key, $this->_getAdapterExpire($adapterIndex, $expire));
+            $result = $result && $this->adapters[$adapterIndex]->touch($key, $this->_getAdapterExpire($adapterIndex, $expire));
         }
 
         return $result;

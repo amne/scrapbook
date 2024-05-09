@@ -79,10 +79,22 @@ class LayeredStore implements KeyValueStore
             return false;
         }
 
+        [$value, $expire] = $value;
+
         $token = md5(serialize($value)); 
         // write the missing value in the previous keyValueStores
         while (--$keyValueStoreIndex) {
-            $this->keyValueStores[$keyValueStoreIndex]->set($key, $value);
+            // $this->_kvSet(
+            //     $this->keyValueStores[$keyValueStoreIndex],
+            //     $key,
+            //     $value,
+            //     $this->_getKeyValueStoreExpire($keyValueStoreIndex, $expire)
+            // );
+            $this->keyValueStores[$keyValueStoreIndex]->set(
+                $key,
+                $this->_packValueExpire($value, $expire),
+                $this->_getKeyValueStoreExpire($keyValueStoreIndex, $expire)
+            );
         }
 
         return $value;
@@ -103,7 +115,7 @@ class LayeredStore implements KeyValueStore
         $keyValueStoreIndex = 0;
         $keyValueStoreValues = [];
         // start with no values and all keys marked as "missing"
-        $values = [];
+        $wrappedValues = [];
         $missing = $keys;
         // keep track of keys we need to sync back up for each keyValueStore
         $syncback = [];
@@ -111,26 +123,51 @@ class LayeredStore implements KeyValueStore
         while (!empty($missing) && $keyValueStoreIndex < count($this->keyValueStores)) {
             $keyValueStoreValues[$keyValueStoreIndex] = $this->keyValueStores[$keyValueStoreIndex]->getMulti($missing);
             // here we build the return of this method: $values
-            $values = array_merge($values, $keyValueStoreValues[$keyValueStoreIndex]);
+            $wrappedValues = array_merge($wrappedValues, $keyValueStoreValues[$keyValueStoreIndex]);
             // in $keyValueStoreValues we know what keys we found in this keyValueStore
             // so if there were keys missing we should sync them back
-            $syncback[$keyValueStoreIndex] = array_intersect($missing, array_keys($keyValueStoreValues[$keyValueStoreIndex]));
+            // $syncback[$keyValueStoreIndex] = array_intersect($missing, array_keys($keyValueStoreValues[$keyValueStoreIndex]));
             $missing = array_diff($missing, array_keys($keyValueStoreValues[$keyValueStoreIndex]));
+            $syncback[$keyValueStoreIndex] = $missing;
             if (!empty($missing)) {
                 $keyValueStoreIndex++;
             }
         }
 
+        $expires = [];
+        $values = [];
+        foreach ($wrappedValues as $key => $value) {
+            [$value, $expire] = $value;
+            $values[$key] = $value;
+            $expires[$key] = $expire;
+        }
+
         // walk back and sync missing values
-        while ($keyValueStoreIndex > 1) {
+        while ($keyValueStoreIndex > 0) {
             $keyValueStoreIndex--;
-            if (!count($syncback[$keyValueStoreIndex])) {
-                continue;
-            }
             // this is best effort by design. no error handling
             // if sets fail then the keyValueStores will not have the
             // keys next time either so it's not a big deal
-            $this->keyValueStores[$keyValueStoreIndex-1]->setMulti($syncback[$keyValueStoreIndex]);
+            $syncvalues = array_filter($values, fn($v, $k) => in_array($k, $syncback[$keyValueStoreIndex]), ARRAY_FILTER_USE_BOTH);
+            if (!count($syncvalues)) {
+                continue;
+            }
+            // $this->_kvSetMulti(
+            //     $this->keyValueStores[$keyValueStoreIndex],
+            //     $syncvalues,
+            //     max(...$expires[$key])
+            // );
+            foreach ($syncvalues as $key => $value) {
+                $this->keyValueStores[$keyValueStoreIndex]->set(
+                    $key,
+                    $this->_packValueExpire($value, $expires[$key]),
+                    $this->_getKeyValueStoreExpire($keyValueStoreIndex, $expires[$key])
+                );
+            }
+            // $this->keyValueStores[$keyValueStoreIndex]->setMulti(
+            //     $this->_packValueExpireMulti($syncvalues, max(...($expires ?? [0]))),
+            //     $this->_getKeyValueStoreExpire(max(...$expires))
+            // );
         }
 
         $tokens = array_map(fn($e):string => md5(serialize($e)), $values);
@@ -144,9 +181,19 @@ class LayeredStore implements KeyValueStore
      * If expire <= 30 days then it's a relative TTL (lifetime) so we'll clamp it
      * to max lifetime for the keyValueStore 
      */
-    private function _getkeyValueStoreExpire(int $keyValueStoreIndex, int $expire = 0)
+    private function _getKeyValueStoreExpire(int $keyValueStoreIndex, int $expire = 0)
     {
         return $expire > 2592000 ? $expire : min($expire, $this->maxLifetimes[$keyValueStoreIndex]);
+    }
+
+    private function _packValueExpire(mixed $value, int $expire = 0): array
+    {
+        return [$value, $expire];
+    }
+
+    private function _packValueExpireMulti(array $items, int $expire = 0): array
+    {
+        return array_map(fn($itemValue) => [$itemValue, $expire], $items);
     }
 
     /**
@@ -163,7 +210,17 @@ class LayeredStore implements KeyValueStore
         $result = true;
         while ($result && $keyValueStoreIndex > 0) {
             $keyValueStoreIndex--;
-            $result = $result && $this->keyValueStores[$keyValueStoreIndex]->set($key, $value, $this->_getkeyValueStoreExpire($keyValueStoreIndex, $expire));
+            $result = $result && $this->keyValueStores[$keyValueStoreIndex]->set(
+                $key,
+                $this->_packValueExpire($value, $expire),
+                $this->_getKeyValueStoreExpire($keyValueStoreIndex, $expire)
+            );
+                // $this->_kvSet(
+                // $this->keyValueStores[$keyValueStoreIndex],
+                // $key,
+                // $value,
+                // $this->_getKeyValueStoreExpire($keyValueStoreIndex, $expire)
+            // );
         }
 
         if (!$result) {
@@ -193,7 +250,17 @@ class LayeredStore implements KeyValueStore
         $result = true;
         while ($result && $keyValueStoreIndex > 0) {
             $keyValueStoreIndex--;
-            $keyValueStoreResults = $this->keyValueStores[$keyValueStoreIndex]->setMulti($items, $this->_getkeyValueStoreExpire($keyValueStoreIndex, $expire));
+            $keyValueStoreResults = $this->keyValueStores[$keyValueStoreIndex]->setMulti(
+                $this->_packValueExpireMulti($items, $expire),
+                $this->_getKeyValueStoreExpire($keyValueStoreIndex, $expire)
+            );
+            //    
+            // $this->_kvSetMulti(
+            //     $this->keyValueStores[$keyValueStoreIndex],
+            //     $items,
+            //     $this->_getKeyValueStoreExpire($keyValueStoreIndex, $expire)
+            // );
+                // $this->keyValueStores[$keyValueStoreIndex]->setMulti($items, $this->_getkeyValueStoreExpire($keyValueStoreIndex, $expire));
             array_walk($results, fn(&$r, $k) => $r = $r && $keyValueStoreResults[$k]);
             $result = array_reduce($results, fn($reduced, $r) => $reduced && $r, true);
         }
@@ -258,7 +325,11 @@ class LayeredStore implements KeyValueStore
         $result = true;
         while ($result && $keyValueStoreIndex > 0) {
             $keyValueStoreIndex--;
-            $result = $result && $this->keyValueStores[$keyValueStoreIndex]->add($key, $value, $this->_getkeyValueStoreExpire($keyValueStoreIndex, $expire));
+            $result = $result && $this->keyValueStores[$keyValueStoreIndex]->add(
+                $key,
+                $this->_packValueExpire($value, $expire),
+                $this->_getKeyValueStoreExpire($keyValueStoreIndex, $expire)
+            );
         }
 
         if (!$result) {
@@ -282,7 +353,11 @@ class LayeredStore implements KeyValueStore
         $result = true;
         while ($keyValueStoreIndex > 0) {
             $keyValueStoreIndex--;
-            $result = $result && $this->keyValueStores[$keyValueStoreIndex]->replace($key, $value, $this->_getkeyValueStoreExpire($keyValueStoreIndex, $expire));
+            $result = $result && $this->keyValueStores[$keyValueStoreIndex]->replace(
+                $key,
+                $this->_packValueExpire($value),
+                $this->_getKeyValueStoreExpire($keyValueStoreIndex, $expire)
+            );
         }
 
         return $result;
@@ -310,41 +385,57 @@ class LayeredStore implements KeyValueStore
     }
 
     /**
-     * Incrementing a value in a layered cache needs to compromise on two things:
+     * Emulate increment:
      * - we'll always do the increment on the last layer and sync the value to
      *   the higher layers
      * - we need to reset the expiration
      */
+    private function _increment(string $key, int $offset = 1, int $initial = 0, int $expire = 0): int|false
+    {
+        $keyValueStoreIndex = count($this->keyValueStores) - 1;
+        $value = false;
+
+        $result = $this->keyValueStores[$keyValueStoreIndex]->get($key);
+        if (false !== $result) {
+            [$value, $oldExpire] = $result;
+            if (!is_numeric($value) || $value < 0) {
+                return false;
+            }
+            $value = max(0, $value + $offset);
+        } else {
+            $value = $initial;
+        }
+
+        while ($keyValueStoreIndex >= 0) {
+            $this->keyValueStores[$keyValueStoreIndex]->set(
+                $key,
+                $this->_packValueExpire($value, $expire),
+                $expire
+            );
+            $keyValueStoreIndex--;
+        }
+
+        return $value;
+    }
+
     public function increment(string $key, int $offset = 1, int $initial = 0, int $expire = 0): int|false
     {
-        $keyValueStoreIndex = count($this->keyValueStores) - 1;
-        $result = $this->keyValueStores[$keyValueStoreIndex]->increment($key, $offset, $initial, $expire);
-        if (false !== $result) {
-            while ($keyValueStoreIndex) {
-                $keyValueStoreIndex--;
-                $this->keyValueStores[$keyValueStoreIndex]->set($key, $result, $expire);
-            }
+        if ($offset <= 0 || $initial < 0) {
+            return false;
         }
 
-        return $result;
+        return $this->_increment($key, $offset, $initial, $expire);
     }
 
-    /**
-     * See increment() for notes about sync and expire
-     */
-    public function decrement(string $key, int $offset = 1, int $initial = 0, int $expire = 0): int|false
+    public function  decrement(string $key, int $offset = 1, int $initial = 0, int $expire = 0): int|false
     {
-        $keyValueStoreIndex = count($this->keyValueStores) - 1;
-        $result = $this->keyValueStores[$keyValueStoreIndex]->decrement($key, $offset, $initial, $expire);
-        if (false !== $result) {
-            while ($keyValueStoreIndex) {
-                $keyValueStoreIndex--;
-                $this->keyValueStores[$keyValueStoreIndex]->set($key, $result, $expire);
-            }
+        if ($offset <= 0 || $initial < 0) {
+            return false;
         }
 
-        return $result;
+        return $this->_increment($key, -$offset, $initial, $expire);
     }
+
 
     /**
      * Reset expiration on a key in all kv-stores
@@ -355,7 +446,7 @@ class LayeredStore implements KeyValueStore
         $result = true;
         while ($keyValueStoreIndex > 0) {
             $keyValueStoreIndex--;
-            $result = $result && $this->keyValueStores[$keyValueStoreIndex]->touch($key, $this->_getkeyValueStoreExpire($keyValueStoreIndex, $expire));
+            $result = $result && $this->keyValueStores[$keyValueStoreIndex]->touch($key, $this->_getKeyValueStoreExpire($keyValueStoreIndex, $expire));
         }
 
         return $result;

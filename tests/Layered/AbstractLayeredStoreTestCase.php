@@ -11,41 +11,46 @@ use MatthiasMullie\Scrapbook\Tests\AbstractKeyValueStoreTestCase;
 
 abstract class AbstractLayeredStoreTestCase extends AbstractKeyValueStoreTestCase
 {
-    protected $subjectAdapters = [];
+    protected $subjectKeyValueStores = [];
     protected $expectedMaxLifetimes = [];
 
     public function getTestKeyValueStore(KeyValueStore $keyValueStore): KeyValueStore
     {
-        $this->subjectAdapters = [
+        $this->subjectKeyValueStores = [
             new MemoryStore(),
             new MemoryStore(),
             $keyValueStore
         ];
 
         $this->expectedMaxLifetimes = [
+            2,
             10,
-            60,
-            120
+            60
         ];
-        return new LayeredStore($this->subjectAdapters, $this->expectedMaxLifetimes);
+        return new LayeredStore($this->subjectKeyValueStores, $this->expectedMaxLifetimes);
     }
 
-    public function testLayeredGetFromCache(): void
+    public function testLayeredGetSyncBack(): void
     {
-        // test if value set via buffered cache can be located
-        // in all cache layers
         $this->testKeyValueStore->set('key', 'value');
-        $this->assertEquals('value', $this->subjectAdapters[0]->get('key'));
-        $this->assertEquals('value', $this->subjectAdapters[1]->get('key'));
-        $this->assertEquals('value', $this->subjectAdapters[2]->get('key'));
+
+        // check if value set via buffered cache can be located
+        // in all cache layers
+        array_walk(
+            $this->subjectKeyValueStores,
+            fn($kvStore) => $this->assertEquals('value', $kvStore->get('key')[0])
+        );
     }
 
-    public function testLayeredSetFromCache(): void
+    public function testLayeredGetMultiSyncBack(): void
     {
-        // test if existing value in cache can be fetched from
-        // buffer & real cache
-        $this->subjectAdapters[2]->set('key', 'value');
-        $this->assertEquals('value', $this->testKeyValueStore->get('key'));
-        $this->assertEquals('value', $this->subjectAdapters[1]->get('key'));
+        $this->subjectKeyValueStores[1]->set('key_1', ['value_1', 0]);
+        $this->subjectKeyValueStores[2]->set('key_2', ['value_2', 0]);
+
+        $this->testKeyValueStore->getMulti(['key_1', 'key_2']);
+
+        // test getMulti brings both keys to kvStore[0]
+        $this->assertEquals('value_1', $this->subjectKeyValueStores[0]->get('key_1')[0]);
+        $this->assertEquals('value_2', $this->subjectKeyValueStores[0]->get('key_2')[0]);
     }
 }
